@@ -63,6 +63,13 @@ def extract_watch_events(json_data):
     return events
 
 # Routes
+@app.route("/init-db")
+def init_db():
+    with app.app_context():
+        db.create_all()
+    return "✅ Database initialized!"
+
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
