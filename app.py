@@ -9,21 +9,19 @@ from collections import defaultdict
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key")
 
-# Robust handling of the database URI
 db_uri = os.environ.get("DATABASE_URL")
 if not db_uri:
     raise RuntimeError("❌ SQLALCHEMY_DATABASE_URI (DATABASE_URL) is not set in environment.")
 app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024  # 5 GB
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'zip', 'json'}
 
 db = SQLAlchemy(app)
 
-# Models
 class User(db.Model):
-    __tablename__ = "users"  # Explicitly set to avoid SQL keyword conflict
+    __tablename__ = "users"
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
     password_hash = db.Column(db.Text, nullable=False)
@@ -36,7 +34,6 @@ class WatchEvent(db.Model):
     duration = db.Column(db.Integer, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
 
-# Helpers
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -62,13 +59,11 @@ def extract_watch_events(json_data):
         events.append({"timestamp": current_time, "channel": channel, "duration": duration})
     return events
 
-# Routes
-@app.route("/init-db")
-def init_db():
-    with app.app_context():
-        db.create_all()
-    return "✅ Database initialized!"
-
+@app.route("/")
+def home():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    return redirect(url_for("results"))
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
@@ -91,7 +86,8 @@ def login():
         user = User.query.filter_by(username=username).first()
         if user and check_password_hash(user.password_hash, password):
             session["user_id"] = user.id
-            return redirect(url_for("upload_file"))
+            has_data = WatchEvent.query.filter_by(user_id=user.id).first()
+            return redirect(url_for("results") if has_data else url_for("upload_file"))
         return "Login fehlgeschlagen."
     return render_template("login.html")
 
@@ -100,7 +96,7 @@ def logout():
     session.clear()
     return redirect(url_for("login"))
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/upload", methods=["GET", "POST"])
 def upload_file():
     if "user_id" not in session:
         return redirect(url_for("login"))
@@ -142,7 +138,6 @@ def upload_file():
         extracted = extract_watch_events(json_data)
         user_id = session["user_id"]
 
-        # Remove old entries for user
         WatchEvent.query.filter_by(user_id=user_id).delete()
         db.session.commit()
 
@@ -154,24 +149,40 @@ def upload_file():
                 user_id=user_id
             ))
         db.session.commit()
+        return redirect(url_for("results"))
 
-        # ✅ Now show result page after upload
-        user_events = WatchEvent.query.filter_by(user_id=user_id).all()
-        channel_totals = defaultdict(int)
-        for e in user_events:
-            channel_totals[e.channel] += e.duration
-        sorted_channels = sorted(channel_totals.items(), key=lambda x: -x[1])
-        top_100_channels = [name for name, _ in sorted_channels[:100]]
-        serialized = [{
-            "timestamp": e.timestamp.isoformat(),
-            "channel": e.channel,
-            "duration": e.duration
-        } for e in user_events]
-
-        return render_template("result.html", watchEvents=serialized, top_channels=top_100_channels)
-
-    # ✅ Show upload form if GET request
     return render_template("index.html")
+
+@app.route("/results")
+def results():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    user_id = session["user_id"]
+    user_events = WatchEvent.query.filter_by(user_id=user_id).all()
+    if not user_events:
+        return redirect(url_for("upload_file"))
+
+    channel_totals = defaultdict(int)
+    for e in user_events:
+        channel_totals[e.channel] += e.duration
+    sorted_channels = sorted(channel_totals.items(), key=lambda x: -x[1])
+    top_100_channels = [name for name, _ in sorted_channels[:100]]
+
+    serialized = [{
+        "timestamp": e.timestamp.isoformat(),
+        "channel": e.channel,
+        "duration": e.duration
+    } for e in user_events]
+
+    return render_template("result.html", watchEvents=serialized, top_channels=top_100_channels)
+
+# Optional: DB setup endpoint
+@app.route("/init-db")
+def init_db():
+    with app.app_context():
+        db.create_all()
+    return "✅ Database initialized!"
 
 # Run
 if __name__ == "__main__":
@@ -179,3 +190,4 @@ if __name__ == "__main__":
         db.create_all()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
