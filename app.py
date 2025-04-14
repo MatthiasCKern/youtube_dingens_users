@@ -155,23 +155,23 @@ def upload_file():
             ))
         db.session.commit()
 
-    # Render analysis page using database data
-    user_id = session["user_id"]
-    user_events = WatchEvent.query.filter_by(user_id=user_id).all()
+        # ✅ Now show result page after upload
+        user_events = WatchEvent.query.filter_by(user_id=user_id).all()
+        channel_totals = defaultdict(int)
+        for e in user_events:
+            channel_totals[e.channel] += e.duration
+        sorted_channels = sorted(channel_totals.items(), key=lambda x: -x[1])
+        top_100_channels = [name for name, _ in sorted_channels[:100]]
+        serialized = [{
+            "timestamp": e.timestamp.isoformat(),
+            "channel": e.channel,
+            "duration": e.duration
+        } for e in user_events]
 
-    channel_totals = defaultdict(int)
-    for e in user_events:
-        channel_totals[e.channel] += e.duration
-    sorted_channels = sorted(channel_totals.items(), key=lambda x: -x[1])
-    top_100_channels = [name for name, _ in sorted_channels[:100]]
+        return render_template("result.html", watchEvents=serialized, top_channels=top_100_channels)
 
-    serialized = [{
-        "timestamp": e.timestamp.isoformat(),
-        "channel": e.channel,
-        "duration": e.duration
-    } for e in user_events]
-
-    return render_template("result.html", watchEvents=serialized, top_channels=top_100_channels)
+    # ✅ Show upload form if GET request
+    return render_template("index.html")
 
 # Run
 if __name__ == "__main__":
