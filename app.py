@@ -13,7 +13,6 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-key")
 db_uri = os.environ.get("DATABASE_URL")
 if not db_uri:
     raise RuntimeError("❌ SQLALCHEMY_DATABASE_URI (DATABASE_URL) is not set in environment.")
-
 app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -24,6 +23,7 @@ db = SQLAlchemy(app)
 
 # Models
 class User(db.Model):
+    __tablename__ = "users"  # Explicitly set to avoid SQL keyword conflict
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=False)
@@ -34,7 +34,7 @@ class WatchEvent(db.Model):
     timestamp = db.Column(db.DateTime, nullable=False)
     channel = db.Column(db.String, nullable=False)
     duration = db.Column(db.Integer, nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
 
 # Helpers
 def allowed_file(filename):
