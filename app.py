@@ -9,17 +9,19 @@ from collections import defaultdict
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key")
 
+# Database configuration
 db_uri = os.environ.get("DATABASE_URL")
 if not db_uri:
     raise RuntimeError("❌ SQLALCHEMY_DATABASE_URI (DATABASE_URL) is not set in environment.")
 app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024  # 5 GB
 ALLOWED_EXTENSIONS = {'zip', 'json'}
 
 db = SQLAlchemy(app)
 
+# Models
 class User(db.Model):
     __tablename__ = "users"
     id = db.Column(db.Integer, primary_key=True)
@@ -34,6 +36,7 @@ class WatchEvent(db.Model):
     duration = db.Column(db.Integer, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
 
+# Helpers
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -59,11 +62,12 @@ def extract_watch_events(json_data):
         events.append({"timestamp": current_time, "channel": channel, "duration": duration})
     return events
 
-@app.route("/")
-def home():
-    if "user_id" not in session:
-        return redirect(url_for("login"))
-    return redirect(url_for("results"))
+# Routes
+@app.route("/init-db")
+def init_db():
+    with app.app_context():
+        db.create_all()
+    return "✅ Database initialized!"
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
@@ -86,8 +90,7 @@ def login():
         user = User.query.filter_by(username=username).first()
         if user and check_password_hash(user.password_hash, password):
             session["user_id"] = user.id
-            has_data = WatchEvent.query.filter_by(user_id=user.id).first()
-            return redirect(url_for("results") if has_data else url_for("upload_file"))
+            return redirect(url_for("dashboard"))
         return "Login fehlgeschlagen."
     return render_template("login.html")
 
@@ -96,62 +99,74 @@ def logout():
     session.clear()
     return redirect(url_for("login"))
 
-@app.route("/upload", methods=["GET", "POST"])
+@app.route("/")
+def home():
+    return redirect(url_for("login"))
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    user_id = session["user_id"]
+    events_exist = WatchEvent.query.filter_by(user_id=user_id).first() is not None
+    if events_exist:
+        return redirect(url_for("results"))
+    else:
+        return render_template("index.html")
+
+@app.route("/upload", methods=["POST"])
 def upload_file():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    if request.method == "POST":
-        if 'file' not in request.files:
-            return redirect(request.url)
-        file = request.files['file']
-        if file.filename == '' or not allowed_file(file.filename):
-            return redirect(request.url)
+    file = request.files.get("file")
+    if not file or file.filename == '' or not allowed_file(file.filename):
+        return redirect(url_for("dashboard"))
 
-        filename = secure_filename(file.filename)
-        ext = filename.rsplit('.', 1)[1].lower()
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-        file.save(filepath)
+    filename = secure_filename(file.filename)
+    ext = filename.rsplit('.', 1)[1].lower()
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    file.save(filepath)
 
-        history_path = None
-        if ext == 'zip':
-            extract_path = os.path.join(app.config['UPLOAD_FOLDER'], "extracted")
-            os.makedirs(extract_path, exist_ok=True)
-            with zipfile.ZipFile(filepath, 'r') as zip_ref:
-                zip_ref.extractall(extract_path)
-            for root, dirs, files in os.walk(extract_path):
-                for f in files:
-                    if "Wiedergabeverlauf" in f and f.endswith(".json"):
-                        history_path = os.path.join(root, f)
-                        break
-                if history_path: break
-        elif ext == 'json':
-            history_path = filepath
+    history_path = None
+    if ext == 'zip':
+        extract_path = os.path.join(app.config['UPLOAD_FOLDER'], "extracted")
+        os.makedirs(extract_path, exist_ok=True)
+        with zipfile.ZipFile(filepath, 'r') as zip_ref:
+            zip_ref.extractall(extract_path)
+        for root, dirs, files in os.walk(extract_path):
+            for f in files:
+                if "Wiedergabeverlauf" in f and f.endswith(".json"):
+                    history_path = os.path.join(root, f)
+                    break
+            if history_path: break
+    elif ext == 'json':
+        history_path = filepath
 
-        if not history_path or not os.path.exists(history_path):
-            return "Wiedergabeverlauf.json nicht gefunden."
+    if not history_path or not os.path.exists(history_path):
+        return "Wiedergabeverlauf.json nicht gefunden."
 
-        with open(history_path, encoding="utf-8") as f:
-            json_data = json.load(f)
+    with open(history_path, encoding="utf-8") as f:
+        json_data = json.load(f)
 
-        extracted = extract_watch_events(json_data)
-        user_id = session["user_id"]
+    extracted = extract_watch_events(json_data)
+    user_id = session["user_id"]
 
-        WatchEvent.query.filter_by(user_id=user_id).delete()
-        db.session.commit()
+    WatchEvent.query.filter_by(user_id=user_id).delete()
+    db.session.commit()
 
-        for e in extracted:
-            db.session.add(WatchEvent(
-                timestamp=e["timestamp"],
-                channel=e["channel"],
-                duration=e["duration"],
-                user_id=user_id
-            ))
-        db.session.commit()
-        return redirect(url_for("results"))
+    for e in extracted:
+        db.session.add(WatchEvent(
+            timestamp=e["timestamp"],
+            channel=e["channel"],
+            duration=e["duration"],
+            user_id=user_id
+        ))
+    db.session.commit()
 
-    return render_template("index.html")
+    return redirect(url_for("results"))
 
 @app.route("/results")
 def results():
@@ -160,8 +175,6 @@ def results():
 
     user_id = session["user_id"]
     user_events = WatchEvent.query.filter_by(user_id=user_id).all()
-    if not user_events:
-        return redirect(url_for("upload_file"))
 
     channel_totals = defaultdict(int)
     for e in user_events:
@@ -177,17 +190,9 @@ def results():
 
     return render_template("result.html", watchEvents=serialized, top_channels=top_100_channels)
 
-# Optional: DB setup endpoint
-@app.route("/init-db")
-def init_db():
-    with app.app_context():
-        db.create_all()
-    return "✅ Database initialized!"
-
 # Run
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
