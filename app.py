@@ -8,10 +8,16 @@ from collections import defaultdict
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key")
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL")
+
+# Robust handling of the database URI
+db_uri = os.environ.get("DATABASE_URL")
+if not db_uri:
+    raise RuntimeError("❌ SQLALCHEMY_DATABASE_URI (DATABASE_URL) is not set in environment.")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024  # 5 GB
 ALLOWED_EXTENSIONS = {'zip', 'json'}
 
 db = SQLAlchemy(app)
