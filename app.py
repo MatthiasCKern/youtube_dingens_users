@@ -9,7 +9,7 @@ from collections import defaultdict
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key")
 
-# Database configuration
+# Robust handling of the database URI
 db_uri = os.environ.get("DATABASE_URL")
 if not db_uri:
     raise RuntimeError("❌ SQLALCHEMY_DATABASE_URI (DATABASE_URL) is not set in environment.")
@@ -23,7 +23,7 @@ db = SQLAlchemy(app)
 
 # Models
 class User(db.Model):
-    __tablename__ = "users"
+    __tablename__ = "users"  # Explicitly named to avoid keyword conflicts
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(64), unique=True, nullable=False)
     password_hash = db.Column(db.Text, nullable=False)
@@ -99,74 +99,76 @@ def logout():
     session.clear()
     return redirect(url_for("login"))
 
-@app.route("/")
-def home():
-    return redirect(url_for("login"))
-
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
     user_id = session["user_id"]
-    events_exist = WatchEvent.query.filter_by(user_id=user_id).first() is not None
-    if events_exist:
+    has_data = WatchEvent.query.filter_by(user_id=user_id).first() is not None
+
+    if has_data:
         return redirect(url_for("results"))
-    else:
-        return render_template("index.html")
+    return render_template("index.html")
 
 @app.route("/upload", methods=["POST"])
 def upload_file():
     if "user_id" not in session:
         return redirect(url_for("login"))
 
-    file = request.files.get("file")
-    if not file or file.filename == '' or not allowed_file(file.filename):
-        return redirect(url_for("dashboard"))
+    try:
+        file = request.files.get("file")
+        if not file or file.filename == '' or not allowed_file(file.filename):
+            return redirect(url_for("dashboard"))
 
-    filename = secure_filename(file.filename)
-    ext = filename.rsplit('.', 1)[1].lower()
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    file.save(filepath)
+        filename = secure_filename(file.filename)
+        ext = filename.rsplit('.', 1)[1].lower()
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        file.save(filepath)
 
-    history_path = None
-    if ext == 'zip':
-        extract_path = os.path.join(app.config['UPLOAD_FOLDER'], "extracted")
-        os.makedirs(extract_path, exist_ok=True)
-        with zipfile.ZipFile(filepath, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
-        for root, dirs, files in os.walk(extract_path):
-            for f in files:
-                if "Wiedergabeverlauf" in f and f.endswith(".json"):
-                    history_path = os.path.join(root, f)
-                    break
-            if history_path: break
-    elif ext == 'json':
-        history_path = filepath
+        history_path = None
+        if ext == 'zip':
+            extract_path = os.path.join(app.config['UPLOAD_FOLDER'], "extracted")
+            os.makedirs(extract_path, exist_ok=True)
+            with zipfile.ZipFile(filepath, 'r') as zip_ref:
+                zip_ref.extractall(extract_path)
+            for root, dirs, files in os.walk(extract_path):
+                for f in files:
+                    if "Wiedergabeverlauf" in f and f.endswith(".json"):
+                        history_path = os.path.join(root, f)
+                        break
+        elif ext == 'json':
+            history_path = filepath
 
-    if not history_path or not os.path.exists(history_path):
-        return "Wiedergabeverlauf.json nicht gefunden."
+        if not history_path or not os.path.exists(history_path):
+            return "Wiedergabeverlauf.json nicht gefunden."
 
-    with open(history_path, encoding="utf-8") as f:
-        json_data = json.load(f)
+        with open(history_path, encoding="utf-8") as f:
+            json_data = json.load(f)
 
-    extracted = extract_watch_events(json_data)
-    user_id = session["user_id"]
+        extracted = extract_watch_events(json_data)
+        user_id = session["user_id"]
 
-    WatchEvent.query.filter_by(user_id=user_id).delete()
-    db.session.commit()
+        WatchEvent.query.filter_by(user_id=user_id).delete()
+        db.session.commit()
 
-    for e in extracted:
-        db.session.add(WatchEvent(
-            timestamp=e["timestamp"],
-            channel=e["channel"],
-            duration=e["duration"],
-            user_id=user_id
-        ))
-    db.session.commit()
+        for e in extracted:
+            db.session.add(WatchEvent(
+                timestamp=e["timestamp"],
+                channel=e["channel"],
+                duration=e["duration"],
+                user_id=user_id
+            ))
+        db.session.commit()
 
-    return redirect(url_for("results"))
+        return redirect(url_for("results"))
+
+    except Exception as e:
+        import traceback
+        print("❌ Upload error:", str(e))
+        traceback.print_exc()
+        return "Ein Fehler ist aufgetreten beim Verarbeiten der Datei."
 
 @app.route("/results")
 def results():
