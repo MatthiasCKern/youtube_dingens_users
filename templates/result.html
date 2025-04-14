@@ -14,6 +14,10 @@
 </head>
 <body>
   <div class="container py-5">
+    <div class="d-flex justify-content-end mb-3">
+      <a href="/logout" class="btn btn-outline-secondary btn-sm">Logout</a>
+    </div>
+
     <h1 class="mb-4 text-primary">YouTube Verlaufsauswertung</h1>
 
     <!-- Channel Filter -->
@@ -103,7 +107,7 @@
     function renderChannelList(top20) {
       const currentSelections = getSelectedChannels();
       channelList.innerHTML = top20.map(([name]) => {
-        const checked = currentSelections.includes(name) ? 'checked' : '';
+        const checked = currentSelections.length === 0 || currentSelections.includes(name) ? 'checked' : '';
         return `
           <div class="form-check channel-item">
             <input class="form-check-input channel-checkbox" type="checkbox" value="${name}" id="cb-${name}" onchange="updateDisplay()" ${checked}>
@@ -175,10 +179,8 @@
 
     function renderQuickAnalysis(title, data, start, end) {
       if (!data || data.length === 0) return '';
-
       const summary = groupBy(data, () => title)[title];
       if (!summary) return '';
-
       return `
         <div class="card shadow mb-4">
           <div class="card-body">
@@ -201,11 +203,9 @@
         return d >= start && d <= end;
       });
 
-        // ✅ Dynamically update Top 20 Channels
       const newTopChannels = Object.entries(groupBy(filteredAll, e => e.channel))
         .sort((a, b) => b[1].duration - a[1].duration)
         .slice(0, 20);
-
       cachedTopChannels = newTopChannels;
       renderChannelList(cachedTopChannels);
 
@@ -225,7 +225,6 @@
 
       const now = new Date(Math.max(...filtered.map(e => new Date(e.timestamp))));
       const currentMonday = new Date(now);
-
       currentMonday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
       currentMonday.setHours(0, 0, 0, 0);
       const lastMonday = new Date(currentMonday);

@@ -1,25 +1,41 @@
-from flask import Flask, render_template, request, redirect
-import os
-import zipfile
-import json
-from datetime import datetime
+from flask import Flask, render_template, request, redirect, session, url_for
+from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+import os, zipfile, json
 from collections import defaultdict
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-key")
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL")
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024  # 5 GB
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'zip', 'json'}
 
+db = SQLAlchemy(app)
 
+# Models
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    events = db.relationship('WatchEvent', backref='user', lazy=True, cascade="all, delete-orphan")
+
+class WatchEvent(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, nullable=False)
+    channel = db.Column(db.String, nullable=False)
+    duration = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+# Helpers
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-
 def extract_watch_events(json_data):
-    events = []
-    entries = []
-
+    events, entries = [], []
     for entry in json_data:
         if "time" in entry and "subtitles" in entry:
             try:
@@ -28,9 +44,7 @@ def extract_watch_events(json_data):
                 entries.append((timestamp, channel))
             except Exception:
                 continue
-
     entries.sort(key=lambda x: x[0])
-
     for i in range(len(entries)):
         current_time, channel = entries[i]
         if i < len(entries) - 1:
@@ -39,17 +53,45 @@ def extract_watch_events(json_data):
             duration = delta if delta < 30 else 0
         else:
             duration = 0
-        events.append({
-            "timestamp": current_time.isoformat(),
-            "channel": channel,
-            "duration": duration
-        })
-
+        events.append({"timestamp": current_time, "channel": channel, "duration": duration})
     return events
 
+# Routes
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        if User.query.filter_by(username=username).first():
+            return "Benutzer existiert bereits."
+        user = User(username=username, password_hash=generate_password_hash(password))
+        db.session.add(user)
+        db.session.commit()
+        return redirect(url_for("login"))
+    return render_template("register.html")
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        user = User.query.filter_by(username=username).first()
+        if user and check_password_hash(user.password_hash, password):
+            session["user_id"] = user.id
+            return redirect(url_for("upload_file"))
+        return "Login fehlgeschlagen."
+    return render_template("login.html")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 @app.route("/", methods=["GET", "POST"])
 def upload_file():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
     if request.method == "POST":
         if 'file' not in request.files:
             return redirect(request.url)
@@ -64,20 +106,17 @@ def upload_file():
         file.save(filepath)
 
         history_path = None
-
         if ext == 'zip':
             extract_path = os.path.join(app.config['UPLOAD_FOLDER'], "extracted")
             os.makedirs(extract_path, exist_ok=True)
             with zipfile.ZipFile(filepath, 'r') as zip_ref:
                 zip_ref.extractall(extract_path)
-
             for root, dirs, files in os.walk(extract_path):
                 for f in files:
                     if "Wiedergabeverlauf" in f and f.endswith(".json"):
                         history_path = os.path.join(root, f)
                         break
-                if history_path:
-                    break
+                if history_path: break
         elif ext == 'json':
             history_path = filepath
 
@@ -87,20 +126,43 @@ def upload_file():
         with open(history_path, encoding="utf-8") as f:
             json_data = json.load(f)
 
-        events = extract_watch_events(json_data)
+        extracted = extract_watch_events(json_data)
+        user_id = session["user_id"]
 
-        channel_totals = defaultdict(int)
-        for e in events:
-            channel_totals[e["channel"]] += e["duration"]
+        # Remove old entries for user
+        WatchEvent.query.filter_by(user_id=user_id).delete()
+        db.session.commit()
 
-        sorted_channels = sorted(channel_totals.items(), key=lambda x: -x[1])
-        top_100_channels = [name for name, _ in sorted_channels[:100]]
+        for e in extracted:
+            db.session.add(WatchEvent(
+                timestamp=e["timestamp"],
+                channel=e["channel"],
+                duration=e["duration"],
+                user_id=user_id
+            ))
+        db.session.commit()
 
-        return render_template("result.html", watchEvents=events, top_channels=top_100_channels)
+    # Render analysis page using database data
+    user_id = session["user_id"]
+    user_events = WatchEvent.query.filter_by(user_id=user_id).all()
 
-    return render_template("index.html")
+    channel_totals = defaultdict(int)
+    for e in user_events:
+        channel_totals[e.channel] += e.duration
+    sorted_channels = sorted(channel_totals.items(), key=lambda x: -x[1])
+    top_100_channels = [name for name, _ in sorted_channels[:100]]
 
+    serialized = [{
+        "timestamp": e.timestamp.isoformat(),
+        "channel": e.channel,
+        "duration": e.duration
+    } for e in user_events]
 
+    return render_template("result.html", watchEvents=serialized, top_channels=top_100_channels)
+
+# Run
 if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
